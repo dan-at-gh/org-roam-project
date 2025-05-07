@@ -1,4 +1,4 @@
-;;; org-roam-project ---
+;;; org-roam-project ---  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;; Load this package with:
@@ -18,13 +18,15 @@
 
 (defvar org-roam-project-keywords
   '(("STATE" . "u") "SCHEDULE_START" "SCHEDULE_END" "REPEAT" "EFFORT"))
-(defvar org-roam-project-states '("TODO" "RUN" "DONE"))
+(defvar org-roam-project-run-id "RUN")
 (defvar org-roam-project-tag "project")
 (defvar org-roam-project-link-property "SUBTASK")
 (defvar org-roam-project-clock-property "CLOCK")
 (defvar org-roam-project-link-heading "Subtasks")
 (defvar org-roam-project-clock-heading "Clocking")
 (defvar org-roam-project-capture-templates nil)
+(defvar org-roam-project-buffer-name "*Org Roam Project*")
+         
 
 (defun org-roam-project-node-p ( node)
   (when (and node
@@ -78,10 +80,28 @@ nil is returned."
       (while (re-search-forward "#\\+.*?\n" nil t))
       (insert "#+" key ": " value))))
 
+(defun org-roam-project-subnodes-re ( heading)
+  (concat "\\*\s+\\(\\[.*]\s+\\)?" heading "\s*$"))
+  
+
+(defun org-roam-project-ids-under-heading ( heading)
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (org-roam-project-subnodes-re heading) nil t)
+      (let (( end (save-excursion
+                    (or (outline-get-next-sibling) (point))))
+            ids)
+        (while (re-search-forward org-link-bracket-re end t)
+          (when (string-match-p "^id:" (match-string-no-properties 1))
+            (setq ids (cons (replace-regexp-in-string
+                             "^id:" "" (match-string-no-properties 1))
+                            ids))))
+        (nreverse ids)))))
+
 (defun org-roam-project-links-under-heading ( heading)
   (save-excursion
     (goto-char (point-min))
-    (when (re-search-forward (concat "^\\*+\s+" heading "\s*$") nil t)
+    (when (re-search-forward (org-roam-project-subnodes-re heading) nil t)
       (let (( end (save-excursion
                     (or (outline-get-next-sibling) (point))))
             nodes)
@@ -98,34 +118,34 @@ nil is returned."
   (when (re-search-forward org-property-end-re nil t)
     (beginning-of-line)
     (dolist ( value values)
-              (insert ":" key "+: " value "\n"))))
+      (insert ":" key "+: " value "\n"))))
+
+(defun org-roam-project-subtree ( heading)
+  (goto-char (point-min))
+  (when (re-search-forward (org-roam-project-subnodes-re heading) nil t)
+    (save-excursion
+      (or (outline-get-next-sibling) (point)))))
 
 (defun org-roam-project-collect-links ()
   (save-excursion
     (org-roam-project-remove-prop org-roam-project-link-property)
-    (goto-char (point-min))
-    (when (re-search-forward (concat "^\\*+\s+"
-                                   org-roam-project-link-heading
-                                   "\s*$")
-                           nil t)
-        (let (( end (save-excursion
-                      (or (outline-get-next-sibling) (point))))
-              ids)
-          (while (re-search-forward org-link-bracket-re end t)
-            (when (string-match-p "^id:" (match-string-no-properties 1))
-              (setq ids (cons (replace-regexp-in-string
-                               "^id:" "" (match-string-no-properties 1))
-                              ids))))
-          (org-roam-project-write-props org-roam-project-link-property
-                                        (nreverse ids))))))
+    (let (( end (org-roam-project-subtree org-roam-project-link-heading))
+          ids)
+      (when end
+        (while (re-search-forward org-link-bracket-re end t)
+          (when (string-match-p "^id:" (match-string-no-properties 1))
+            (setq ids (cons (replace-regexp-in-string
+                             "^id:" "" (match-string-no-properties 1))
+                            ids))))
+        (org-roam-project-write-props org-roam-project-link-property
+                                      (delete-dups (nreverse ids)))))))
 
 (defun org-roam-project-collect-clocks ()
   (save-excursion
     (org-roam-project-remove-prop org-roam-project-clock-property)
     (goto-char (point-min))
-    (when (re-search-forward (concat "^\\*+\s+"
-                                     org-roam-project-clock-heading
-                                     "\s*$")
+    (when (re-search-forward (org-roam-project-subnodes-re
+                              org-roam-project-clock-heading)
                              nil t)
       (let (( limit (save-excursion
                       (or (outline-get-next-sibling) (point))))
@@ -158,14 +178,15 @@ nil is returned."
   (org-roam-project-collect-clocks)
   (save-excursion
     (goto-char (point-min))
-    (let (( keywords (org-collect-keywords
-                      (mapcar (lambda (key) (if (consp key) (car key) key))
-                              org-roam-project-keywords))))
+    (let* (( keys (mapcar (lambda (key) (if (consp key) (car key) key))
+                              org-roam-project-keywords))
+           ( keywords (org-collect-keywords keys)))
+      (dolist ( key keys)
+        (org-roam-project-remove-prop key))
       (dolist ( keyword keywords)
         (let* (( prop (car keyword))
                ( value (cadr keyword))
                ( flag (cdr (assoc prop org-roam-project-keywords))))
-          (org-roam-project-remove-prop prop)
           (unless (string-empty-p value)
             (cond ((string= flag "u")
                    (setq value (upcase value))))
@@ -176,9 +197,17 @@ nil is returned."
   (cond ((org-roam-project-file-p)
          (org-roam-project-task-props))
         ((org-roam-project-daily-file-time)
-         (org-roam-project-collect-links))))
+         (org-roam-project-collect-links)
+         (org-roam-project-format-all))))
+
+(defun org-roam-project-after-save ()
+  (when (and (or (org-roam-project-file-p)
+                 (org-roam-project-daily-file-time))
+             (get-buffer-window org-roam-project-buffer-name))
+    (org-roam-project-buffer nil 'background)))
 
 (add-hook 'before-save-hook 'org-roam-project-before-save)
+(add-hook 'after-save-hook 'org-roam-project-after-save)
 
 (defun org-roam-project-nodes ()
   (mapcar (lambda ( item) (org-roam-node-from-id (car item)))
@@ -208,8 +237,7 @@ nil is returned."
 
 (defun org-roam-project-subnodes ( node)
   (let (( ids-string (cdr (assoc org-roam-project-link-property
-                                 (when node (org-roam-node-properties node)))))
-        nodes)
+                                 (when node (org-roam-node-properties node))))))
     (when ids-string
       (mapcar (lambda (id) (org-roam-node-from-id id))
               (split-string ids-string)))))
@@ -335,7 +363,15 @@ dailies node for the current day.  If such node does not exist,
 return nil."
   (org-roam-project-subnodes (org-roam-project-daily-node-time time)))
 
-(defun org-roam-project-buffer ( &optional arg)
+(defun org-roam-project-buffer-display ()
+  (if (get-buffer-window org-roam-project-buffer-name)
+      (get-buffer org-roam-project-buffer-name)
+    (if (or (org-roam-project-file-p)
+            (org-roam-project-daily-file-time))
+        (switch-to-buffer-other-window org-roam-project-buffer-name)
+      (switch-to-buffer org-roam-project-buffer-name))))
+
+(defun org-roam-project-buffer ( &optional arg background)
   (interactive "P")
   (let* (( time (org-roam-project-daily-time (equal arg '(4))))
          ( daily-node (org-roam-project-daily-node-time time))
@@ -348,32 +384,39 @@ return nil."
                          (format-time-string "%A, %d. %B %Y" time))))
          ( root-nodes-time (org-roam-project-subnodes daily-node))
          ( root-nodes (org-roam-project-root-nodes (org-roam-project-nodes))))
-    (switch-to-buffer-other-window "*Org Roam Project*")
-    (setq buffer-read-only nil)
-    (erase-buffer)
-    (org-mode)
-    (insert "#+title: Org Roam Project\n")
-    (let* (( goals-tasks (org-roam-project-goals-tasks root-nodes-time))
-           ( goals (car goals-tasks))
-           ( goal-tasks (org-roam-project-goal-tasks goals))
-           ( tasks (cdr goals-tasks)))
-      (org-roam-project-tree-tasks (append tasks goal-tasks)
-                                   (concat "Tasks " daily-link) time)
-      (when goals
-        (org-roam-project-tree-goals goals "Goals" time)))
-    (let* (( goals-tasks (org-roam-project-goals-tasks root-nodes))
-           ( goals (car goals-tasks))
-           ( goal-tasks (org-roam-project-goal-tasks goals))
-           ( tasks (cdr goals-tasks)))
-      (org-roam-project-tree-goals goals "Goals All")
-      (org-roam-project-tree-tasks goal-tasks "Goal Tasks Summary")
-      (org-roam-project-tree-tasks tasks "Non-Goal Tasks")
-      (org-roam-project-tree-tasks (append tasks goal-tasks) "Tasks All"))
-    (org-update-all-dblocks)
-    (org-roam-project-buffer-clean-up
-     (org-roam-project-buffer-today-p time)))
-  (set-buffer-modified-p nil)
-  (setq buffer-read-only t))
+    (with-current-buffer (org-roam-project-buffer-display)
+      (setq buffer-read-only nil)
+      (erase-buffer)
+      (orp-report-mode)
+      (insert "#+title: Org Roam Project\n")
+      (let* (( goals-tasks (org-roam-project-goals-tasks root-nodes-time))
+             ( goals (car goals-tasks))
+             ( goal-tasks (org-roam-project-goal-tasks goals))
+             ( tasks (cdr goals-tasks)))
+        (org-roam-project-tree-tasks (append tasks goal-tasks)
+                                     (concat "Tasks " daily-link) time)
+        (when goals
+          (org-roam-project-tree-goals goals "Goals" time)))
+      (let* (( goals-tasks (org-roam-project-goals-tasks root-nodes))
+             ( goals (car goals-tasks))
+             ( goal-tasks (org-roam-project-goal-tasks goals))
+             ( tasks (cdr goals-tasks)))
+        (org-roam-project-tree-goals goals "Goals All")
+        (org-roam-project-tree-tasks goal-tasks "Goal Tasks Summary")
+        (org-roam-project-tree-tasks tasks "Non-Goal Tasks")
+        (org-roam-project-tree-tasks (append tasks goal-tasks) "Tasks All"))
+      (org-update-all-dblocks)
+      (org-roam-project-buffer-clean-up (org-roam-project-buffer-today-p time))
+      (set-buffer-modified-p nil)
+      (setq buffer-read-only t))))
+
+(define-derived-mode orp-report-mode org-mode "ORP-Report"
+  "Major mode for org-roam-project reports"
+  (unless (eq (current-buffer) (get-buffer "*Org Roam Project*"))
+    (error "Only one Org-Roam-Project buffer allowed."))
+  (setq truncate-lines t)
+  (define-key orp-report-mode-map (kbd "g") 'org-roam-project-buffer))
+  
 
 (defun org-roam-project-buffer-today-p ( time)
   (string= (format-time-string "%Y-%m-%d" time)
@@ -392,7 +435,7 @@ return nil."
     (replace-match ""))
   (goto-char (point-min))
   (when goto-run
-    (re-search-forward (concat "|\s*" (cadr org-roam-project-states) "\s*|")
+    (re-search-forward (concat "|\s*" org-roam-project-run-id "\s*|")
                        nil t))
   (beginning-of-line))
 
@@ -409,8 +452,8 @@ return nil."
            ( title (cadr (assoc "TITLE" keywords)))
            ( effort (cadr (assoc "EFFORT" keywords))))
       (goto-char (point-min))
-      (unless (re-search-forward (concat "^\\*+\s+"
-                                         org-roam-project-clock-heading)
+      (unless (re-search-forward (org-roam-project-subnodes-re
+                                  org-roam-project-clock-heading)
                                  nil t)
         (goto-char (point-max))
         (insert "\n\n* " org-roam-project-clock-heading))
@@ -426,20 +469,23 @@ return nil."
 (defun org-roam-project-clock-in ()
   (interactive)
   (let ( node id-title)
-    (if (setq node (org-roam-project-link-at-point))
-        (with-current-buffer (find-file-noselect (org-roam-node-file node))
-          (setq id-title (org-roam-project-file-clock-in)))
-      (when (setq node (org-roam-project-file-p))
-        (setq id-title (org-roam-project-file-clock-in))))
-    (unless node
-        (user-error "No Org Roam Project Node clocked-in."))
-    (org-roam-project-daily-add (car id-title) (cdr id-title))
-    (message "%s clocked-in." (cdr id-title))))
+    (cond ((setq node (org-roam-project-link-at-point))
+           (with-current-buffer (find-file-noselect (org-roam-node-file node))
+             (setq id-title (org-roam-project-file-clock-in))))
+          ((org-roam-project-file-p)
+           (setq id-title (org-roam-project-file-clock-in)))
+          ((eq major-mode 'org-mode)
+           (org-clock-in))
+          (t
+           (org-clock-in '(4))))
+    (when id-title
+      (org-roam-project-daily-add (car id-title) (cdr id-title) nil 'no-dups)
+      (message "%s clocked-in." (cdr id-title)))))
 
 (defun org-roam-project-running-clock ()
   (unless (re-search-forward "\\]--\\[" (line-beginning-position) t -1)
     (org-insert-timestamp (current-time) 'with-hm 'inactive "--")
-    (org-set-property "STATE" (cadr org-roam-project-states)))
+    (org-set-property "STATE" org-roam-project-run-id))
   (end-of-line))
 
 (defun org-roam-project-clock-string ( &optional time time-end)
@@ -508,10 +554,7 @@ The optional argument TIME functions as a filter for clock lines."
         ( capture-plist-save org-capture-plist)
         ( org-roam-directory (expand-file-name org-roam-dailies-directory
                                                org-roam-directory))
-        ( org-roam-dailies-directory "./")
-        ( immediate-finish (plist-get
-                            (assoc "w" org-roam-project-capture-templates)
-                            :immediate-finish)))
+        ( org-roam-dailies-directory "./"))
     (org-roam-capture- :goto nil
                        :keys "w"
                        :node (org-roam-node-create)
@@ -527,13 +570,26 @@ The optional argument TIME functions as a filter for clock lines."
 (defun org-roam-project-daily-node ( time-string)
   "Get Org Roam Dailies node by a time string.
 
-TIME-STRING should have the format %Y-%m-%d, e.g. 2025-05-02."
+TIME-STRING should have the format %Y-%m-%d, e.g. 2025-05-02.
+Query string for the cons cell is %%\"REPEAT\" . \"hallo\"%%,
+i.e. the round bracket is replaced by two percent symbols."
   (org-roam-node-from-id
    (caar (org-roam-db-query
           [:select [id]
 	               :from nodes
 	               :where (like properties $r1)]
           (concat "%%\"CATEGORY\" . \"" time-string "\"%%")))))
+
+;; %%"REPEAT" . "hallo"%%
+(defun org-roam-project-repeat-nodes ()
+  "Get Org Roam nodes with repeating tasks."
+  (mapcar (lambda (raw-id)
+            (org-roam-project-node-p (org-roam-node-from-id (car raw-id))))
+          (org-roam-db-query
+           [:select [id]
+	                :from nodes
+	                :where (like properties $r1)]
+           (concat "%%\"REPEAT\"%%"))))
 
 (defun org-roam-project-daily-node-time ( &optional time)
   "Get Org Roam Dailies node by a Lisp timestamp.
@@ -543,25 +599,35 @@ is used.  If no dailies node exists for the given time, nil is returned."
   (org-roam-project-daily-node
    (format-time-string "%Y-%m-%d" (or time (current-time)))))
 
-(defun org-roam-project-daily-add ( id title &optional time)
+(defun org-roam-project-daily-link-exists (id &optional time)
+  (let (( buffer-exists (get-buffer (format-time-string "%Y-%m-%d.org" time))))
+    (if buffer-exists
+        (with-current-buffer buffer-exists
+          (member id
+                  (org-roam-project-ids-under-heading
+                   org-roam-project-link-heading)))
+      (member id (org-roam-project-node-subids
+                  (org-roam-project-daily-node-time time))))))
+
+(defun org-roam-project-daily-add ( id title &optional time no-dups)
   "Add a link to an org-roam-project task at org-roam-dailies node.
 
 ID and TITLE refers to an org-roam-project task node.  LISP-TIMESTAMP can
 be used to add the link at a specific date."
-  (if (member id (org-roam-project-node-subids
-                  (org-roam-project-daily-node-time time)))
+  (if (and no-dups (org-roam-project-daily-link-exists id time))
       (message "%s already scheduled for today." title)
     (let* (( buffers (org-roam-project-daily-buffer time))
            ( base-buffer (car buffers))
            ( buffer-exists (cdr buffers)))
       (with-current-buffer base-buffer
         (goto-char (point-min))
-        (if (re-search-forward (concat "^\\*\s+" org-roam-project-link-heading)
+        (if (re-search-forward (org-roam-project-subnodes-re
+                                org-roam-project-link-heading)
                                nil t)
             (org-end-of-subtree)
           (goto-char (point-max))
-          (insert "\n\n* " org-roam-project-link-heading))
-        (insert "\n- " (org-link-make-string (concat "id:" id) title))
+          (insert "\n\n* [/][%] " org-roam-project-link-heading))
+        (insert "\n- [ ] :: " (org-link-make-string (concat "id:" id) title))
         (save-buffer)
         (unless buffer-exists
           (kill-buffer))))))
@@ -579,7 +645,7 @@ be used to add the link at a specific date."
     (when time-string
       (org-roam-project-string-to-time time-string))))
 
-(defun org-roam-project-new-node-clock-in ()
+(defun org-roam-project-new-node-flags ()
   (when (org-roam-project-file-p)
     (save-excursion
       (goto-char (point-min))
@@ -595,14 +661,11 @@ be used to add the link at a specific date."
                                 (with-temp-buffer
                                   (org-time-stamp nil)))))
                    (org-roam-project-daily-add id title time)
-                   (message "12 %s" (marker-buffer  org-capture-last-stored-marker))
-                   (message "%s %s" (org-roam-capture--get :new-file)
-                            (find-buffer-visiting (org-roam-capture--get :new-file))
                    (message "Added %s to dailies at %s."
                             title (format-time-string "%Y-%m-%d" time)))))))
-      ))))
+      )))
 
-(add-hook 'org-roam-capture-new-node-hook 'org-roam-project-new-node-clock-in)
+(add-hook 'org-roam-capture-new-node-hook 'org-roam-project-new-node-flags)
 
 (org-link-set-parameters
  "dailies"
@@ -620,6 +683,88 @@ be used to add the link at a specific date."
                        :templates org-roam-dailies-capture-templates
                        :props (list :override-default-time time))
     (run-hooks 'org-roam-dailies-find-file-hook)))
+
+(defun org-roam-project-get-time-frame ( term effort-minutes subids)
+  (let (( start-minutes (org-duration-to-minutes
+                         (or (match-string-no-properties 1 term) -1.0)))
+        ( separator (match-string-no-properties 2 term))
+        ( stop-minutes (org-duration-to-minutes
+                        (or (match-string-no-properties 3 term) -1.0)))
+        ( subid-count (length subids)))
+    (cond ((< 0 subid-count)
+           (cond ((and (string= separator ">") (< -1 start-minutes))
+                  (format "%s>%-5s"
+                          (org-duration-from-minutes start-minutes)
+                          (concat "(" (number-to-string subid-count) ")")))
+                 ((and (string= separator "<") (< -1 stop-minutes))
+                  (format "%5s<%s"
+                          (concat "(" (number-to-string subid-count) ")")
+                          (org-duration-from-minutes stop-minutes)))))
+           ((and (string= separator ">") (< -1 start-minutes))
+           (concat (org-duration-from-minutes start-minutes)
+                   ">"
+                   (org-duration-from-minutes
+                    (+ start-minutes effort-minutes))))
+          ((and (string= separator "<") (< -1 stop-minutes))
+           (concat (org-duration-from-minutes
+                    (- stop-minutes effort-minutes))
+                   "<"
+                   (org-duration-from-minutes stop-minutes))))))
+
+(defun org-roam-property-center-string ( string space)
+  (let* (( prepost (/ (- space (length string)) 2))
+         ( prepostfix (make-string (if (< prepost 0) 0 prepost) ? )))
+    (format (concat "%-" (number-to-string space) "s")
+            (concat prepostfix string prepostfix ))))
+
+(defun org-roam-project-format-line ()
+  (beginning-of-line)
+  (when (looking-at "-\\(.*?\\)::\\(.*?\\)\s*$")
+    (let (( term (match-string-no-properties 1))
+          ( description (match-string-no-properties 2))
+          ( beg (match-beginning 1))
+          ( end (match-end 1))
+          ( check "[ ]")
+          ( time "")
+          effort-minutes subids)
+      (delete-region beg end)
+      (goto-char beg)
+      (when (string-match org-link-bracket-re description)
+        (when (string-match-p "^id:" (match-string-no-properties 1 description))
+          (let* (( node (org-roam-project-node-p
+                         (org-roam-node-from-id
+                          (replace-regexp-in-string
+                           "^id:" "" (match-string-no-properties 1 description))))))
+            (when node
+              (setq effort-minutes (org-duration-to-minutes
+                                    (org-roam-project-node-effort node))
+                    subids (org-roam-project-node-subids node))))))
+      (when (string-match "\\[[ X]\\]" term)
+        (setq check (match-string-no-properties 0 term)))
+      (cond ((and effort-minutes
+                  (string-match (concat "\\([0-2]?[0-9]:[0-5][0-9]\\)?"
+                                       "\\([<>]\\)"
+                                       "\\([0-2]?[0-9]:[0-5][0-9]\\)?")
+                                term))
+             (setq time (org-roam-project-get-time-frame term effort-minutes subids)))
+            ((string-match "[^({]\\([0-2]?[0-9]:[0-5][0-9]\\)[^})]" term)
+             (setq time (match-string-no-properties 1 term)))
+            (effort-minutes
+             (if subids
+                 (setq time (concat "(" (number-to-string (length subids)) ")"))
+               (setq time (concat "{"
+                                  (org-duration-from-minutes effort-minutes)
+                                  "}")))
+             (setq time (org-roam-property-center-string time 11)))
+            )
+      (insert (format " %s %-11s " check time)))))
+
+(defun org-roam-project-format-all ()
+  (save-excursion
+    (let (( end (org-roam-project-subtree org-roam-project-link-heading)))
+      (while (re-search-forward "^-.*?::" end t)
+        (org-roam-project-format-line)))))
+    
 
 (provide 'org-roam-project)
 

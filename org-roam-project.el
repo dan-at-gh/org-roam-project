@@ -28,6 +28,7 @@
 (defvar org-roam-project-clock-heading "Clocking")
 (defvar org-roam-project-capture-templates nil)
 (defvar org-roam-project-buffer-name "*Org Roam Project*")
+(defvar org-roam-project-goals-buffer-name "*Org-Roam Goals*")
 (defvar org-roam-project-update-link-title t)
 
 (defun org-roam-project-node-p ( node &optional user-error update-db)
@@ -249,24 +250,39 @@ depth of 1."
       (setq siblings (append (org-roam-project-subnodes bl-node) siblings)))
     siblings))
 
+(defun org-roam-project-nodes-diff ( a b)
+  (let (( ids-b (mapcar 'org-roam-node-id b))
+        diff)
+    (dolist ( node a)
+      (unless (member (org-roam-node-id node) ids-b)
+        (setq diff (cons node diff))))
+    diff))
+
 (defun org-roam-project-goals-buffer ()
   (interactive)
   (let* (( child-node (org-roam-project-node-at-point))
          ( child-id (org-roam-node-id child-node))
          ( nodes-roots (org-roam-project-preorder-reverse child-node))
+         ( all-root-nodes (org-roam-project-root-nodes (org-roam-project-nodes)))
+         ( roots-diff (org-roam-project-nodes-diff all-root-nodes (cdr nodes-roots)))
+         ( goals-tasks (org-roam-project-goals-tasks roots-diff))
+         ( goals (car goals-tasks))
          ( ids (mapcar 'org-roam-node-id (car nodes-roots)))
          ( sibling-ids (mapcar 'org-roam-node-id
                                (org-roam-project-node-siblings child-node)))
          ( roots (cdr nodes-roots))
-         ( trees (org-roam-project-preorder roots)))
-    (switch-to-buffer-other-window "*Org-Roam Goals*")
+         ( trees (org-roam-project-preorder roots))
+         pos)
+    (switch-to-buffer-other-window org-roam-project-goals-buffer-name)
     (erase-buffer)
-    (org-mode)
+    (orp-goals-mode)
+    (setq pos (point))
     (insert "#+title: Goals Buffer\n\n"
             (propertize "Goals reached by: " 'font-lock-face '(:foreground "deep pink"))
             (org-link-make-string (concat "id:" child-id)
                                   (org-roam-node-title child-node))
             "\n")
+    (put-text-property pos (point) 'valid-task t)
     (dolist ( tree trees)
       (dolist ( node-level tree)
         (let* (( node (car node-level))
@@ -286,10 +302,45 @@ depth of 1."
             (when (string= id child-id)
               (let (( overlay (make-overlay (line-beginning-position 0)
                                             (line-beginning-position))))
-                (overlay-put overlay 'face '(:background "LightPink1" :extend t))
-                (overlay-put overlay 'name "org-roam-project"))))))))
+                (overlay-put overlay 'face '(:background "pale turquoise" :extend t))
+                (overlay-put overlay 'name "org-roam-project")))))))
+    (insert "\n* Rest Goals")
+    (setq pos (point))
+    (dolist (project goals)
+      (dolist ( node-level project)
+        (let* (( node (car node-level))
+               ( id (org-roam-node-id node))
+               ( level (cdr node-level)))
+          (insert "\n" (make-string (1+ level) ?*) " "
+                  (org-link-make-string (concat "id:" id)
+                                        (org-roam-node-title node))))))
+    (put-text-property pos (point) 'valid-goal t))
   (org-update-checkbox-count)
   (goto-char (point-min)))
+
+(defun org-roam-project-goals-exit ()
+  (interactive)
+  (unless (get-text-property (point) 'valid-goal)
+    (user-error "Not a valid goal node"))
+  (beginning-of-line)
+  (let (( goal-node (org-roam-project-next-link (line-end-position)))
+        ( task-node (and (goto-char (point-min))
+                         (re-search-forward (regexp-quote "Goals reached by") nil t)
+                         (get-text-property (point) 'valid-task)
+                         (org-roam-project-next-link))))
+    (unless task-node
+      (user-error "Not a valid task node"))
+    (when (y-or-n-p (concat "Add \"" (org-roam-node-title task-node)
+                            "\" into \"" (org-roam-node-title goal-node) "\""))
+        (org-roam-project-goal-add task-node goal-node))))
+
+(define-derived-mode orp-goals-mode org-mode "ORP-Goals"
+  "Major mode for org-roam-project edit buffer."
+  (unless (eq (current-buffer) (get-buffer org-roam-project-goals-buffer-name))
+    (error "Only one Org-Roam-Project goals buffer allowed"))
+  (setq truncate-lines t)
+  (define-key orp-goals-mode-map (kbd "q") 'kill-this-buffer))
+
 
 (defun org-roam-project-task-props ()
   "Write content to properties."
@@ -538,7 +589,8 @@ return nil."
 
 (defun org-roam-project-daily-stats ()
   (save-excursion
-    (when (org-roam-project-daily-time-string)
+    (when (string= (format-time-string "%Y-%m-%d")
+                   (org-roam-project-daily-time-string))
       (let* (( end (cdr (org-roam-project-subtree org-roam-project-link-heading)))
              ( sum-todo-minutes 0)
              ( sum-effort-minutes 0)
@@ -552,12 +604,15 @@ return nil."
             (setq sum-done-minutes (+ sum-done-minutes done-minutes)
                   sum-todo-minutes (+ sum-todo-minutes todo-minutes)
                   sum-effort-minutes (+ sum-effort-minutes effort-minutes))))
-        (org-set-property "day"
-                          (concat " " (org-duration-from-minutes sum-done-minutes) " / "
-                                  (org-duration-from-minutes sum-effort-minutes)
-                                  " (Done/Effort)  "
-                                  (org-duration-from-minutes sum-todo-minutes)
-                                  " (Todo)"))))))
+        (let (( end-time (time-add (current-time) (* sum-todo-minutes 60))))
+          (org-set-property "day"
+                            (concat " " (org-duration-from-minutes sum-done-minutes) " / "
+                                    (org-duration-from-minutes sum-effort-minutes)
+                                    " (Done/Effort)  "
+                                    (org-duration-from-minutes sum-todo-minutes)
+                                    " (Todo)  "
+                                    (format-time-string "%H:%M" end-time)
+                                    " (Day End)")))))))
 
 (defun org-roam-project-buffer ( &optional arg)
   (interactive "P")
@@ -989,6 +1044,13 @@ at the end of the corresponding subtree."
     (org-roam-node-insert 'org-roam-project-node-effort :templates templates))
   (save-buffer))
 
+(defun org-raom-project-after-capture ()
+  "Current buffer is the buffer before invoking capture, i.e. the
+calling buffer."
+  (save-buffer))
+
+(add-hook 'org-capture-after-finalize-hook 'org-raom-project-after-capture)
+
 (defun org-roam-project-has-time-p ( time-string)
   "Nil if org time string has no day time specified.  Otherwise
 return day time string.
@@ -1317,9 +1379,13 @@ When not in daily task list, use native org function
         (save-buffer))
     (org-toggle-checkbox toggle-presence)))
 
+(defun org-roam-project-fontify-allowed-buffer ()
+  (or (org-roam-project-file-p)
+      (org-roam-project-daily-file-time)
+      (eq (current-buffer) (get-buffer org-roam-project-goals-buffer-name))))
+
 (defun org-roam-project-fontify-running ( limit)
-  (when (or (org-roam-project-file-p)
-            (org-roam-project-daily-file-time))
+  (when (org-roam-project-fontify-allowed-buffer)
     (let (( beg-end (save-excursion
                       (org-roam-project-subtree
                        org-roam-project-link-heading)))
@@ -1329,7 +1395,7 @@ When not in daily task list, use native org function
                   (< (car beg-end) (point)) (< (point) (cdr beg-end)))
         (let* (( node (save-excursion
                         (org-roam-project-next-link (line-end-position))))
-               ( running (org-roam-project-running-p node)))
+               ( running (when node (org-roam-project-running-p node))))
           (when running
             (add-face-text-property (line-beginning-position)
                                     (line-beginning-position 2)
@@ -1341,6 +1407,8 @@ When not in daily task list, use native org function
   '(
     ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Todo)"
      ( 1 '(:weight bold :background "yellow" :foreground "purple")  t))
+    ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Day End)"
+     ( 1 'show-paren-mismatch  t))
     ("\\+[0-9]?[0-9]:[0-5][0-9]"
      ( 0 '(:foreground "green")  t))
     ("-[0-9]?[0-9]:[0-5][0-9]"
@@ -1350,8 +1418,7 @@ When not in daily task list, use native org function
     ))
 
 (defun org-roam-project-font-lock-add-keywords ()
-  (when (or (org-roam-project-file-p)
-            (org-roam-project-daily-file-time))
+  (when (org-roam-project-fontify-allowed-buffer)
     (dolist ( keyword org-roam-project-font-lock-extra-keywords)
       (add-to-list 'org-font-lock-extra-keywords keyword 'append))
     (add-to-list 'org-font-lock-extra-keywords
@@ -1361,8 +1428,7 @@ When not in daily task list, use native org function
 (defun org-roam-project-fontify-buffer ()
   (dolist ( buffer (match-buffers '( derived-mode . org-mode)))
     (with-current-buffer buffer
-      (when (or (org-roam-project-file-p)
-                (org-roam-project-daily-file-time))
+      (when (org-roam-project-fontify-allowed-buffer)
         (font-lock-flush)
         (font-lock-ensure)))))
 
@@ -1723,7 +1789,7 @@ NODE is reference to the current node."
             (org-roam-project-time-term-hide 'unhide))
         (if refresh
             (org-roam-project-time-term-hide 'unhide)
-          (org-roam-project-time-term-hide))))))  
+          (org-roam-project-time-term-hide))))))
 
 (provide 'org-roam-project)
 

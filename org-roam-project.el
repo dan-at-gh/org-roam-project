@@ -313,17 +313,19 @@ depth of 1."
   (org-fold-hide-drawer-all))
 
 (defun org-roam-project-before-save ()
-  (cond ((org-roam-project-file-p)
-         (org-roam-project-task-props))
-        ((org-roam-project-daily-file-time)
-         (org-roam-project-spread-goal)
-         (org-roam-project-collect-links)
-         (org-roam-project-format-all)
-         (org-roam-project-daily-stats)))
-  (when (or (org-roam-project-file-p) (org-roam-project-daily-file-time))
-    (org-update-checkbox-count)
-    (when org-roam-project-update-link-title
-      (org-roam-project-links-title-update))))
+  (save-excursion
+    (cond ((org-roam-project-file-p)
+           (org-roam-project-task-props))
+          ((org-roam-project-daily-file-time)
+           (org-roam-project-spread-goal)
+           (org-roam-project-collect-links)
+           (org-roam-project-format-all)
+           (org-roam-project-time-term-hide)
+           (org-roam-project-daily-stats)))
+    (when (or (org-roam-project-file-p) (org-roam-project-daily-file-time))
+      (org-update-checkbox-count)
+      (when org-roam-project-update-link-title
+        (org-roam-project-links-title-update)))))
 
 (defun org-roam-project-after-save ()
   (when (and (or (org-roam-project-file-p)
@@ -535,26 +537,27 @@ return nil."
   (concat (when (string-match "^[^-]" string) "+") string))
 
 (defun org-roam-project-daily-stats ()
-  (when (org-roam-project-daily-time-string)
-    (let* (( end (cdr (org-roam-project-subtree org-roam-project-link-heading)))
-           ( sum-todo-minutes 0)
-           ( sum-effort-minutes 0)
-           ( sum-done-minutes 0))
-      (while (and end (re-search-forward "^-\s+\\[\\([ X]\\)\\]\s+\\(.*?\\)\s*::" end t))
-        (let* (( term (match-string 2))
-               ( columns (split-string term "[\s/]" 'omit-nulls))
-               ( effort-minutes (org-roam-project-duration-to-minutes (nth 5 columns)))
-               ( done-minutes (org-roam-project-duration-to-minutes (nth 4 columns)))
-               ( todo-minutes (org-roam-project-duration-to-minutes (nth 3 columns))))
-          (setq sum-done-minutes (+ sum-done-minutes done-minutes)
-                sum-todo-minutes (+ sum-todo-minutes todo-minutes)
-                sum-effort-minutes (+ sum-effort-minutes effort-minutes))))
-      (org-set-property "day"
-                        (concat " " (org-duration-from-minutes sum-done-minutes) " / "
-                                (org-duration-from-minutes sum-effort-minutes)
-                                " (Done/Effort)  "
-                                (org-duration-from-minutes sum-todo-minutes)
-                                " (Todo)")))))
+  (save-excursion
+    (when (org-roam-project-daily-time-string)
+      (let* (( end (cdr (org-roam-project-subtree org-roam-project-link-heading)))
+             ( sum-todo-minutes 0)
+             ( sum-effort-minutes 0)
+             ( sum-done-minutes 0))
+        (while (and end (re-search-forward "^-\s+\\[\\([ X]\\)\\]\s+\\(.*?\\)\s*::" end t))
+          (let* (( term (match-string 2))
+                 ( columns (split-string term "[\s/]" 'omit-nulls))
+                 ( effort-minutes (org-roam-project-duration-to-minutes (nth 5 columns)))
+                 ( done-minutes (org-roam-project-duration-to-minutes (nth 4 columns)))
+                 ( todo-minutes (org-roam-project-duration-to-minutes (nth 3 columns))))
+            (setq sum-done-minutes (+ sum-done-minutes done-minutes)
+                  sum-todo-minutes (+ sum-todo-minutes todo-minutes)
+                  sum-effort-minutes (+ sum-effort-minutes effort-minutes))))
+        (org-set-property "day"
+                          (concat " " (org-duration-from-minutes sum-done-minutes) " / "
+                                  (org-duration-from-minutes sum-effort-minutes)
+                                  " (Done/Effort)  "
+                                  (org-duration-from-minutes sum-todo-minutes)
+                                  " (Todo)"))))))
 
 (defun org-roam-project-buffer ( &optional arg)
   (interactive "P")
@@ -1310,65 +1313,63 @@ When not in daily task list, use native org function
                     (looking-at "-\s+\\[\\(X\\)\\].*?::"))
                (replace-match " " t nil nil 1)
                (org-roam-project-log-done node 'undone)))
-        (org-update-checkbox-count))
+        (org-update-checkbox-count)
+        (save-buffer))
     (org-toggle-checkbox toggle-presence)))
 
-(defun org-roam-project-goal-fontify ( limit)
+(defun org-roam-project-fontify-running ( limit)
   (when (or (org-roam-project-file-p)
             (org-roam-project-daily-file-time))
     (let (( beg-end (save-excursion
                       (org-roam-project-subtree
-                       org-roam-project-link-heading))))
-      (when (and beg-end
-                 (re-search-forward "^-\s+\\(\\[\s\\]\\)\s" limit t)
-                 (< (car beg-end) (point)) (< (point) (cdr beg-end)))
-        (let* (( beg (match-beginning 1))
-               ( end (match-end 1))
-               ( node (save-excursion
+                       org-roam-project-link-heading)))
+          fontified)
+      (while (and beg-end (not fontified)
+                  (re-search-forward "^-\s+\\(\\[\s\\]\\)\s" limit t)
+                  (< (car beg-end) (point)) (< (point) (cdr beg-end)))
+        (let* (( node (save-excursion
                         (org-roam-project-next-link (line-end-position))))
                ( running (org-roam-project-running-p node)))
           (when running
-            (add-face-text-property beg end '(:background "cyan"))
-            t))))))
+            (add-face-text-property (line-beginning-position)
+                                    (line-beginning-position 2)
+                                    '(:background "misty rose" :extend t))
+            (setq fontified t))))
+      fontified)))
 
-(defun org-roam-project-daily-fontify ( limit)
-  (when (org-roam-project-daily-file-time)
-    (cond ((re-search-forward "\\([+-]\\)[0-9]?[0-9]:[0-5][0-9]" limit t)
-           (let (( color (if (string= "+" (match-string-no-properties 1))
-                             "green" "orange")))
-             (add-face-text-property (match-beginning 0) (match-end 0)
-                                     `(:foreground ,color))
-             t))
-          ((re-search-forward (concat "\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)"
-                                      "/"
-                                      "\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)"
-                                      "\s*(Done/Effort)")
-                              limit t)
-           (add-face-text-property (match-beginning 1) (match-end 1)
-                                     `(:weight bold :background "yellow"))
-           (add-text-properties (match-beginning 2) (match-end 2)
-                                `(face tty-menu-enabled-face))
-           t)
-          ((re-search-forward (concat "\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)"
-                                      "\s*(Todo)")
-                              limit t)
-           (add-face-text-property (match-beginning 1) (match-end 1)
-                                   `(:weight bold
-                                             :background "yellow" :foreground "purple"))
-           t)
-          (t
-           nil))))
+(defvar org-roam-project-font-lock-extra-keywords
+  '(
+    ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Todo)"
+     ( 1 '(:weight bold :background "yellow" :foreground "purple")  t))
+    ("\\+[0-9]?[0-9]:[0-5][0-9]"
+     ( 0 '(:foreground "green")  t))
+    ("-[0-9]?[0-9]:[0-5][0-9]"
+     ( 0 '(:foreground "orange")  t))
+    ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)/\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Done/Effort)"
+     ( 1 '(:weight bold :background "yellow")  t) ( 2 'tty-menu-enabled-face  t))
+    ))
 
 (defun org-roam-project-font-lock-add-keywords ()
-  (add-to-list 'org-font-lock-extra-keywords
-               '( org-roam-project-goal-fontify ( 0 nil append t))
-               'append)
-  (add-to-list 'org-font-lock-extra-keywords
-               '( org-roam-project-daily-fontify ( 0 nil append t))
-               'append))
+  (when (or (org-roam-project-file-p)
+            (org-roam-project-daily-file-time))
+    (dolist ( keyword org-roam-project-font-lock-extra-keywords)
+      (add-to-list 'org-font-lock-extra-keywords keyword 'append))
+    (add-to-list 'org-font-lock-extra-keywords
+                 '( org-roam-project-fontify-running ( 0 nil append t))
+                 'append)))
+
+(defun org-roam-project-fontify-buffer ()
+  (dolist ( buffer (match-buffers '( derived-mode . org-mode)))
+    (with-current-buffer buffer
+      (when (or (org-roam-project-file-p)
+                (org-roam-project-daily-file-time))
+        (font-lock-flush)
+        (font-lock-ensure)))))
 
 (add-hook 'org-font-lock-set-keywords-hook
           #'org-roam-project-font-lock-add-keywords)
+(add-hook 'org-clock-out-hook #'org-roam-project-fontify-buffer 'last)
+(add-hook 'org-clock-in-hook #'org-roam-project-fontify-buffer 'last)
 
 (defun org-roam-project-ivy-action ( item)
   (let (( task-node (org-roam-project-node-at-point))
@@ -1680,6 +1681,49 @@ NODE is reference to the current node."
                               (concat "id:" (org-roam-node-id node)))
                      (not (string= description title)))
             (replace-match title t nil nil 2)))))))
+
+(defun org-roam-project-find-overlays ( pos prop)
+  (save-match-data
+    (let ((overlays (overlays-at pos))
+          found)
+      (while (and (not found) overlays)
+        (let ((overlay (car overlays)))
+          (if (overlay-get overlay prop)
+              (setq found overlay)))
+        (setq overlays (cdr overlays)))
+      found)))
+
+(defun org-roam-project-time-term-hide ( &optional unhide)
+  (when (org-roam-project-daily-time-string)
+    (save-excursion
+      (let (( beg-end (org-roam-project-subtree org-roam-project-link-heading)))
+        (when beg-end
+          (remove-text-properties (line-beginning-position) (line-end-position)
+                                  '(orp-hidden nil))
+          (remove-overlays nil nil 'orp-type 'time-term)
+          (unless unhide
+            (put-text-property (line-beginning-position) (line-end-position)
+                               'orp-hidden t)
+            (while (re-search-forward "^-\s+\\[[\sX]\\]\s.\\{11\\}\\(.*?\\)\s::"
+                                      (cdr beg-end) t)
+              (let (( overlay (make-overlay (match-beginning 1) (match-end 1))))
+                (overlay-put overlay 'invisible t)
+                (overlay-put overlay 'orp-type 'time-term)))))))))
+
+(advice-add 'org-move-item-up :after 'org-roam-project-time-term-hide)
+(advice-add 'org-move-item-down :after 'org-roam-project-time-term-hide)
+
+(defun org-roam-project-time-term-toggle ( &optional refresh)
+  (interactive)
+  (save-excursion
+    (when (org-roam-project-subtree org-roam-project-link-heading)
+      (if (get-text-property (line-beginning-position) 'orp-hidden)
+          (if refresh
+              (org-roam-project-time-term-hide)
+            (org-roam-project-time-term-hide 'unhide))
+        (if refresh
+            (org-roam-project-time-term-hide 'unhide)
+          (org-roam-project-time-term-hide))))))  
 
 (provide 'org-roam-project)
 

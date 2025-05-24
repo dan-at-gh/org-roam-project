@@ -30,6 +30,8 @@
 (defvar org-roam-project-buffer-name "*Org Roam Project*")
 (defvar org-roam-project-goals-buffer-name "*Org-Roam Goals*")
 (defvar org-roam-project-update-link-title t)
+(defvar org-roam-project-tags
+  '(("home" . "green") ("emacs" . "blue") ("personal" . nil) ("nerd" . nil)))
 
 (defun org-roam-project-node-p ( node &optional user-error update-db)
   (cond ((and node
@@ -72,21 +74,21 @@ nil is returned."
         (setq clocks (cons (replace-regexp-in-string "_" " " raw-clock) clocks))))
     (nreverse clocks)))
 
+(defun org-roam-project-get-prop ( key)
+  (save-excursion
+    (goto-char (point-min))
+    (let (( limit (save-excursion (re-search-forward "^*+\s" nil t)))
+          value)
+      (while (re-search-forward (concat ":" key "\\+?:\s+\\([^\n]*\\)\s*$") limit t)
+        (setq value (cons (match-string-no-properties 1) value)))
+      value)))
+
 (defun org-roam-project-remove-prop ( key)
   (save-excursion
     (goto-char (point-min))
     (let (( limit (save-excursion (re-search-forward "^*+\s" nil t))))
       (while (re-search-forward (concat ":" key "\\+?:") limit t)
         (delete-region (line-beginning-position) (line-beginning-position 2))))))
-
-;; (defun org-roam-project-set-keyword ( key value)
-;;   (save-excursion
-;;     (goto-char (point-min))
-;;     (if (re-search-forward (concat "#\\+" key ":\s\\(.*?\\)$") nil t)
-;;         (replace-match value t nil nil 1)
-;;       (re-search-forward org-property-end-re nil t)
-;;       (while (re-search-forward "#\\+.*?\n" nil t))
-;;       (insert "#+" key ": " value))))
 
 (defun org-roam-project-subnodes-re ( heading)
   "Return regexp for a heading line.
@@ -273,7 +275,9 @@ depth of 1."
          ( roots (cdr nodes-roots))
          ( trees (org-roam-project-preorder roots))
          pos)
+    (message "%s" (length (car nodes-roots)))
     (switch-to-buffer-other-window org-roam-project-goals-buffer-name)
+    (setq buffer-read-only nil)
     (erase-buffer)
     (orp-goals-mode)
     (setq pos (point))
@@ -283,28 +287,29 @@ depth of 1."
                                   (org-roam-node-title child-node))
             "\n")
     (put-text-property pos (point) 'valid-task t)
-    (dolist ( tree trees)
-      (dolist ( node-level tree)
-        (let* (( node (car node-level))
-               ( id (org-roam-node-id node))
-               ( done (org-roam-project-done-p node))
-               ( level (cdr node-level))
-               sibling-p)
-          (when (or (setq sibling-p (member id sibling-ids))
-                    (member id ids))
-            (insert (if sibling-p
-                        (concat (make-string level ? ) "- "
-                                (if done "[X] " "[ ] "))
-                      (concat "\n" (make-string level ?*) " TODO [/][%] "))
-                    (org-link-make-string (concat "id:" id)
-                                          (org-roam-node-title node))
-                    (if sibling-p "\n" "\n\n"))
-            (when (string= id child-id)
-              (let (( overlay (make-overlay (line-beginning-position 0)
-                                            (line-beginning-position))))
-                (overlay-put overlay 'face '(:background "pale turquoise" :extend t))
-                (overlay-put overlay 'name "org-roam-project")))))))
-    (insert "\n* Rest Goals")
+    (when (< 1 (length (car nodes-roots)))
+      (dolist ( tree trees)
+        (dolist ( node-level tree)
+          (let* (( node (car node-level))
+                 ( id (org-roam-node-id node))
+                 ( done (org-roam-project-done-p node))
+                 ( level (cdr node-level))
+                 sibling-p)
+            (when (or (setq sibling-p (member id sibling-ids))
+                      (member id ids))
+              (insert (if sibling-p
+                          (concat (make-string level ? ) "- "
+                                  (if done "[X] " "[ ] "))
+                        (concat "\n" (make-string level ?*) " TODO [/][%] "))
+                      (org-link-make-string (concat "id:" id)
+                                            (org-roam-node-title node))
+                      (if sibling-p "\n" "\n\n"))
+              (when (string= id child-id)
+                (let (( overlay (make-overlay (line-beginning-position 0)
+                                              (line-beginning-position))))
+                  (overlay-put overlay 'face '(:background "pale turquoise" :extend t))
+                  (overlay-put overlay 'name "org-roam-project"))))))))
+    (insert "\n\n\n* Rest Goals")
     (setq pos (point))
     (dolist (project goals)
       (dolist ( node-level project)
@@ -316,7 +321,14 @@ depth of 1."
                                         (org-roam-node-title node))))))
     (put-text-property pos (point) 'valid-goal t))
   (org-update-checkbox-count)
-  (goto-char (point-min)))
+  (goto-char (point-max))
+  (outline-show-all)
+  (when (re-search-forward "^\\*\s" nil t -1)
+    (org-cycle) (org-cycle))
+  (while (re-search-forward "^\\*\s" nil t -1)
+    (org-cycle))
+  (set-buffer-modified-p nil)
+  (setq buffer-read-only t))
 
 (defun org-roam-project-goals-exit ()
   (interactive)
@@ -339,7 +351,8 @@ depth of 1."
   (unless (eq (current-buffer) (get-buffer org-roam-project-goals-buffer-name))
     (error "Only one Org-Roam-Project goals buffer allowed"))
   (setq truncate-lines t)
-  (define-key orp-goals-mode-map (kbd "q") 'kill-this-buffer))
+  (define-key orp-goals-mode-map (kbd "q") 'kill-this-buffer)
+  (define-key orp-goals-mode-map (kbd "<return>") 'org-roam-project-goals-exit))
 
 
 (defun org-roam-project-task-props ()
@@ -578,41 +591,6 @@ return nil."
             (org-roam-project-daily-file-time))
         (switch-to-buffer-other-window org-roam-project-buffer-name)
       (switch-to-buffer org-roam-project-buffer-name))))
-
-(defun org-roam-project-duration-to-minutes ( duration)
-  (if (string-match "^\s*-" duration)
-      0
-    (org-duration-to-minutes (string-trim duration "+"))))
-
-(defun org-roam-project-sign-prefix ( string)
-  (concat (when (string-match "^[^-]" string) "+") string))
-
-(defun org-roam-project-daily-stats ()
-  (save-excursion
-    (when (string= (format-time-string "%Y-%m-%d")
-                   (org-roam-project-daily-time-string))
-      (let* (( end (cdr (org-roam-project-subtree org-roam-project-link-heading)))
-             ( sum-todo-minutes 0)
-             ( sum-effort-minutes 0)
-             ( sum-done-minutes 0))
-        (while (and end (re-search-forward "^-\s+\\[\\([ X]\\)\\]\s+\\(.*?\\)\s*::" end t))
-          (let* (( term (match-string 2))
-                 ( columns (split-string term "[\s/]" 'omit-nulls))
-                 ( effort-minutes (org-roam-project-duration-to-minutes (nth 5 columns)))
-                 ( done-minutes (org-roam-project-duration-to-minutes (nth 4 columns)))
-                 ( todo-minutes (org-roam-project-duration-to-minutes (nth 3 columns))))
-            (setq sum-done-minutes (+ sum-done-minutes done-minutes)
-                  sum-todo-minutes (+ sum-todo-minutes todo-minutes)
-                  sum-effort-minutes (+ sum-effort-minutes effort-minutes))))
-        (let (( end-time (time-add (current-time) (* sum-todo-minutes 60))))
-          (org-set-property "day"
-                            (concat " " (org-duration-from-minutes sum-done-minutes) " / "
-                                    (org-duration-from-minutes sum-effort-minutes)
-                                    " (Done/Effort)  "
-                                    (org-duration-from-minutes sum-todo-minutes)
-                                    " (Todo)  "
-                                    (format-time-string "%H:%M" end-time)
-                                    " (Day End)")))))))
 
 (defun org-roam-project-buffer ( &optional arg)
   (interactive "P")
@@ -1047,6 +1025,7 @@ at the end of the corresponding subtree."
 (defun org-raom-project-after-capture ()
   "Current buffer is the buffer before invoking capture, i.e. the
 calling buffer."
+  (message "org-raom-project-after-capture buffer: %s" (current-buffer))
   (save-buffer))
 
 (add-hook 'org-capture-after-finalize-hook 'org-raom-project-after-capture)
@@ -1085,6 +1064,10 @@ plain, scheduled or deadlined day-time."
         (unless buffer-exists
           (kill-buffer))))))
 
+(defun org-roam-project-insert-task ( id title)
+  (org-roam-project-insert-heading org-roam-project-link-heading)
+  (insert "\n- [ ] " (org-link-make-string (concat "id:" id) title)))
+
 (defun org-roam-project-goal-add ( task-node goal-node)
   "Add subnode (task) to superior node (goal).
 
@@ -1094,10 +1077,8 @@ subtask list."
          ( buffer (get-file-buffer file)))
     (with-current-buffer (or buffer
                              (find-file-noselect file))
-      (org-roam-project-insert-heading org-roam-project-link-heading)
-      (insert "\n- [ ] " (org-link-make-string
-                          (concat "id:" (org-roam-node-id task-node))
-                          (org-roam-node-title task-node)))
+      (org-roam-project-insert-task (org-roam-node-id task-node)
+                                    (org-roam-node-title task-node))
       (save-buffer)
       (unless buffer
         (kill-buffer)))))
@@ -1185,15 +1166,6 @@ buffer."
                    "<"
                    (org-duration-from-minutes stop-minutes))))))
 
-(defun org-roam-property-center-string ( string space)
-  "Center string.
-
-Center STRING in available SPACE."
-  (let* (( prepost (/ (- space (length string)) 2))
-         ( prepostfix (make-string (if (< prepost 0) 0 prepost) ? )))
-    (format (concat "%-" (number-to-string space) "s")
-            (concat prepostfix string prepostfix ))))
-
 (defun org-roam-project-recent-done-time ( dones &optional end-time)
   (unless end-time (setq end-time (current-time)))
   (let ( found time)
@@ -1203,35 +1175,98 @@ Center STRING in available SPACE."
         (setq found time)))
     found))
 
-(defun org-roam-project-time-column (term effort-minutes)
-  (cond ((and (not term) effort-minutes )
-         (org-roam-property-center-string
-          (propertize (concat "(" (org-duration-from-minutes effort-minutes) ")")
-                      'font-lock-face 'dired-ignored)
-          11))
-        ((and effort-minutes
+(defun org-roam-project-time-column (term effort-minutes done-minutes done-p)
+  (cond ((and (not done-p)
+              term
+              effort-minutes
               (string-match (concat "\\([0-2]?[0-9]:[0-5][0-9]\\)?"
                                     "\\([<>]\\)"
                                     "\\([0-2]?[0-9]:[0-5][0-9]\\)?")
                             term))
          (org-roam-project-get-time-frame term effort-minutes))
-        ((string-match "^\\([0-2]?[0-9]:[0-5][0-9]\\)" term)
-         (match-string-no-properties 1 term))
-        (effort-minutes
-         (org-roam-property-center-string
-          (propertize (concat "(" (org-duration-from-minutes effort-minutes) ")")
-                  'font-lock-face 'dired-ignored)
-          11))
+        ((and (not done-p)
+              term
+              (not (string-match "/" term)))
+         (string-trim term))
+        ((and effort-minutes done-minutes)
+         (format "%5s/%-5s"
+                 (org-duration-from-minutes done-minutes)
+                 (org-duration-from-minutes effort-minutes)))
         (t
          "")))
 
-(defun org-roam-project-format-line ( day-start node)
+(defun org-roam-project-duration-to-minutes ( duration)
+  (if (string-match "^\s*-" duration)
+      0
+    (org-duration-to-minutes (string-trim duration "+"))))
+
+(defun org-roam-project-sign-prefix ( string)
+  (concat (when (string-match "^[^-]" string) "+") string))
+
+(defun org-roam-project-tags-stats ( node-tags)
+  (let (( project-tags (mapcar 'car org-roam-project-tags))
+        tags)
+    (dolist (tag node-tags)
+      (when (member tag project-tags)
+        (setq tags (cons tag tags))))
+    tags))
+
+(defun org-roam-project-daily-stats ()
+  (save-excursion
+    (when (string= (format-time-string "%Y-%m-%d")
+                   (org-roam-project-daily-time-string))
+      (let* (( end (cdr (org-roam-project-subtree org-roam-project-link-heading)))
+             ( sum-todo-minutes 0)
+             ( sum-effort-minutes 0)
+             ( sum-done-minutes 0)
+             tag-minutes plist tag-effort tag-done tag-todo)
+        (while (and end (re-search-forward "^-\s+\\[\\([ X]\\)\\]\s+\\(.*?\\)\s*::" end t))
+          (let* (( done (string= (match-string-no-properties 1) "X"))
+                 ( term (match-string 2))
+                 ( columns (split-string term "[\s/]" 'omit-nulls))
+                 ( effort-minutes (org-roam-project-duration-to-minutes (nth 5 columns)))
+                 ( done-minutes (org-roam-project-duration-to-minutes (nth 4 columns)))
+                 ( todo-minutes (org-roam-project-duration-to-minutes (nth 3 columns)))
+                 ( node (org-roam-project-next-link (line-end-position)))
+                 ( tags (org-roam-project-tags-stats (org-roam-node-tags node))))
+            (setq sum-done-minutes (+ sum-done-minutes done-minutes)
+                  sum-todo-minutes (+ sum-todo-minutes (if done 0 todo-minutes))
+                  sum-effort-minutes (+ sum-effort-minutes effort-minutes))
+            (when tags
+              (dolist ( tag tags)
+              (setq plist (cdr (assoc tag tag-minutes))
+                    tag-effort (+ (if plist (plist-get plist :effort) 0) effort-minutes)
+                    tag-done (+ (if plist (plist-get plist :done) 0) done-minutes)
+                    tag-todo (+ (if plist (plist-get plist :todo) 0) todo-minutes)
+                    tag-minutes (cons `(,tag . (:effort ,tag-effort
+                                                        :done ,tag-done
+                                                        :todo ,tag-todo))
+                                      tag-minutes))))))
+        (let (( end-time (time-add (current-time) (* sum-todo-minutes 60))))
+          (org-set-property "day"
+                            (concat " " (org-duration-from-minutes sum-done-minutes) " / "
+                                    (org-duration-from-minutes sum-effort-minutes)
+                                    " (Done/Effort)  "
+                                    (org-duration-from-minutes sum-todo-minutes)
+                                    " (Todo)  "
+                                    (format-time-string "%H:%M" end-time)
+                                    " (Day End)"))
+          (dolist ( tag-color org-roam-project-tags)
+            (when (setq plist (cdr (assoc (car tag-color) tag-minutes)))
+              (setq tag-done (plist-get plist :done)
+                    tag-effort (plist-get plist :effort)
+                    tag-todo (plist-get plist :todo))
+              (org-set-property (car tag-color)
+                                (format " %5s / %5s (Done/Effort) %5s (Todo)"
+                                        (org-duration-from-minutes tag-done)
+                                        (org-duration-from-minutes tag-effort)
+                                        (org-duration-from-minutes tag-todo)))))
+          )))))
+
+(defun org-roam-project-format-line ( day-start node term term-beg-end done-p)
   (beginning-of-line)
   (when (looking-at "-\s+\\[\s\\]\s\\(.*?\\)::")
-    (let* (( term (match-string-no-properties 1))
-           ( term-beg (match-beginning 1))
-           ( term-end (match-end 1))
-           ( effort (org-roam-project-node-effort node))
+    (let* (( effort (org-roam-project-node-effort node))
            ( effort-minutes (org-duration-to-minutes effort))
            ( clocks (org-roam-project-node-clock node))
            ( done-minutes (org-roam-project-done-minutes clocks))
@@ -1242,11 +1277,13 @@ Center STRING in available SPACE."
            ( todo-minutes (- effort-minutes done-minutes))
            ( todo-previous-minutes (org-roam-project-remaining-minutes
                                     effort-minutes done-previous-minutes)))
-      (delete-region term-beg term-end)
-      (goto-char term-beg)
+      (delete-region (car term-beg-end) (cdr term-beg-end))
+      (goto-char (car term-beg-end))
       (insert (format "%-11s %s/%s %s %s/%s %s "
                       (org-roam-project-time-column (car (split-string term))
-                                                    effort-minutes)
+                                                    effort-minutes
+                                                    done-minutes
+                                                    done-p)
                       (propertize (org-duration-from-minutes done-minutes)
                                   'help-echo "Duration since last done")
                       (propertize effort
@@ -1262,7 +1299,7 @@ Center STRING in available SPACE."
                                   'help-echo "Done before today")
                       )))))
 
-(defun org-roam-project-format-all ()
+(defun org-roam-project-format-all ( &optional done-node)
   "Format all task entries of dailies tasks list.
 
 Consider only open tasks.  If a task occurs more than one time in
@@ -1274,13 +1311,17 @@ number of the same task per day."
           ( beg-end (org-roam-project-subtree org-roam-project-link-heading))
           ids)
       (goto-char (cdr beg-end))
-      (while (re-search-forward "^-\s+\\[\s\\]\s+.*?::" (car beg-end) t -1)
+      (while (re-search-forward "^-\s+\\[\s\\]\s\\(.*?\\)::" (car beg-end) t -1)
         (let* (( pos (match-beginning 0))
+               ( term (match-string-no-properties 1))
+               ( term-beg-end `(,(match-beginning 1) . ,(match-end 1)))
                ( node (org-roam-project-next-link (line-end-position)))
+               ( done-p (when done-node (string= (org-roam-node-id node)
+                                                 (org-roam-node-id done-node))))
                ( id (and node (org-roam-node-id node))))
           (unless (member id ids)
             (setq ids (cons id ids))
-            (org-roam-project-format-line day-start node))
+            (org-roam-project-format-line day-start node term term-beg-end done-p))
           (goto-char pos))))))
 
 (defun org-roam-project-spread-goal ()
@@ -1361,7 +1402,6 @@ TOGGLE-PRESENCE is passed to org native checkbox toggle function.
 When not in daily task list, use native org function
 `org-toggle-checkbox' instead."
   (interactive "P")
-  (org-roam-project-format-all)
   (if (and (org-roam-project-daily-time-string)
            (org-roam-project-point-in-heading org-roam-project-link-heading))
       (let* (( node-op (org-roam-project-valid-checkbox))
@@ -1369,6 +1409,8 @@ When not in daily task list, use native org function
              ( op (cdr node-op)))
         (cond ((and (eq op 'check)
                     (looking-at "-\s+\\[\\(\s\\)\\].*?::"))
+               (save-match-data
+                 (org-roam-project-format-all node))
                (replace-match "X" t nil nil 1)
                (org-roam-project-log-done node))
               ((and (eq op 'uncheck)
@@ -1413,7 +1455,7 @@ When not in daily task list, use native org function
      ( 0 '(:foreground "green")  t))
     ("-[0-9]?[0-9]:[0-5][0-9]"
      ( 0 '(:foreground "orange")  t))
-    ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)/\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Done/Effort)"
+    ("\\(\s[0-9]?[0-9]:[0-5][0-9]\s\\)/\\(\s+[0-9]?[0-9]:[0-5][0-9]\s\\)\s*(Done/Effort)"
      ( 1 '(:weight bold :background "yellow")  t) ( 2 'tty-menu-enabled-face  t))
     ))
 
@@ -1780,6 +1822,10 @@ NODE is reference to the current node."
 (advice-add 'org-move-item-down :after 'org-roam-project-time-term-hide)
 
 (defun org-roam-project-time-term-toggle ( &optional refresh)
+  "Show/hide time term part in task list of dailies buffers.
+
+REFRESH will only ensure that the time term is consistently shown
+or hidden, e.g. after clocking state changes."
   (interactive)
   (save-excursion
     (when (org-roam-project-subtree org-roam-project-link-heading)
@@ -1790,6 +1836,73 @@ NODE is reference to the current node."
         (if refresh
             (org-roam-project-time-term-hide 'unhide)
           (org-roam-project-time-term-hide))))))
+
+(defvar org-roam-project-store-node nil)
+(defvar org-roam-project-goal-ids nil)
+
+(defun org-roam-project-test-test ()
+  (when org-roam-project-store-node
+    (goto-char (point-min))
+    (when (re-search-forward "^\\*\s+dummy\s*$" nil t)
+      (replace-match ""))
+    (let (( id (org-roam-node-id org-roam-project-store-node))
+          ( title (org-roam-node-title org-roam-project-store-node)))
+      (org-roam-project-insert-task id title))
+    (delete-trailing-whitespace))
+  (setq org-roam-project-store-node nil))
+
+(defun org-roam-project-capture-cleanup ()
+  (message "Clean-up aborted capture: %s %s" org-note-abort (buffer-name))
+  (when org-note-abort
+    (let (( stored-ids (org-roam-project-get-prop org-roam-project-link-property))
+          ( listed-ids (org-roam-project-ids-under-heading
+                        org-roam-project-link-heading))
+          ( beg-end (org-roam-project-subtree org-roam-project-link-heading))
+          remove-ids)
+      (when (and listed-ids (car beg-end) (cdr beg-end))
+        (dolist ( id listed-ids)
+          (unless (member id stored-ids)
+            (setq remove-ids (cons id remove-ids))))
+        (dolist ( id remove-ids)
+          (goto-char (car beg-end))
+          (when (re-search-forward id (cdr beg-end) t)
+            (delete-region (line-beginning-position) (line-beginning-position 2))))))))
+
+(add-hook 'org-capture-mode-hook 'org-roam-project-test-test)
+(add-hook 'org-capture-prepare-finalize-hook 'org-roam-project-capture-cleanup)
+
+(defun org-roam-project-valid-goal-ids ( node)
+  (let* (( nodes-roots (org-roam-project-preorder-reverse node))
+         ( all-root-nodes (org-roam-project-root-nodes (org-roam-project-nodes)))
+         ( roots-diff (org-roam-project-nodes-diff all-root-nodes (cdr nodes-roots)))
+         ( trees (org-roam-project-preorder roots-diff))
+         ids)
+    (dolist ( tree trees)
+      (dolist ( node-level tree)
+        (setq ids (cons (org-roam-node-id (car node-level)) ids))))
+    ids))
+    
+(defun org-roam-project-ivy-insert-into-goal-filter ( node)
+  (member (org-roam-node-id node) org-roam-project-goal-ids))
+
+(defun org-roam-project-ivy-insert-into-goal ()
+  (let* (( node (or (org-roam-project-node-at-point)
+                    (user-error "No Org-Roam project node at point")))
+         ( completing-read-function 'ivy-completing-read)
+         ( templates `(("t" "Task" entry "* dummy%?"
+                        :target (file+head "%<%Y%m%d%H%M%S>.org"
+                                           ,(concat "#+title: ${title}\n"
+                                                    "#+filetags: :project:\n"
+                                                    "#+effort: %^{effort}"))
+                        :empty-lines-before 0
+                        :empty-lines-after 0
+                        :unnarrowed t
+                        :jump-to-captured nil
+                        :kill-buffer nil))))
+    (setq org-roam-project-store-node node
+          org-roam-project-goal-ids (org-roam-project-valid-goal-ids node))
+    (org-roam-capture nil nil :filter-fn 'org-roam-project-ivy-insert-into-goal-filter
+                         :templates templates)))
 
 (provide 'org-roam-project)
 
